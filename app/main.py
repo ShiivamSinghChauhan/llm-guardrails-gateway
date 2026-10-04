@@ -8,6 +8,10 @@ from langgraph.graph.message import add_messages
 from typing import TypedDict, Annotated
 from langgraph.checkpoint.memory import InMemorySaver
 from langchain_core.messages import AnyMessage, HumanMessage
+from regex_guard_layer import detect_prompt_injection
+
+FALLBACK = "I'm sorry, I cannot process this request as it violates our safety policies."
+
 
 llm = ChatOpenAI(
     model='openai/gpt-oss-20b',
@@ -44,6 +48,13 @@ thread_id = 1
 while True:
     user_message = input('You: ')
     if user_message.strip().lower() in ['break', 'end', 'bye', 'quit']:
+        break
+
+    # GUARD: check before we spend a single token
+    if detect_prompt_injection(user_message):
+        print("  [BLOCKED: prompt_injection]")
+
+        print(FALLBACK)
         break
 
     config = {'configurable': {'thread_id': thread_id}}
