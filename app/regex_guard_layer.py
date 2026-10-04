@@ -56,7 +56,7 @@ def _luhn_valid(digits: str) -> bool:
     total = 0
     for i, d in enumerate(reversed(digits)):
         n = int(d)
-        if i % 2 == 1:          # double every second digit from the right
+        if i % 2 == 1:        
             n *= 2
             if n > 9:
                 n -= 9
@@ -108,4 +108,55 @@ def detect_pii(text: str) -> list[dict]:
     return findings
 
 
-# print(detect_pii("My card 4532-0151-1283-0366 and 1234567890123456 and my friend card is: 1 2 3 456 789 01 2      5 4 5    6 , blabla321@example.com, okok3212   @ e xample     . c o m "))
+def redact_pii(text: str, findings: list[dict]) -> str:
+    """Replace detected PII with [REDACTED:<TYPE>] placeholders."""
+    redacted = text
+    for f in findings:
+        placeholder = f"[REDACTED:{f['type'].upper()}]"
+
+        if f.get("evasion") == "spacing":
+            pattern = r"\s*".join(re.escape(c) for c in f["match"])
+            redacted = re.sub(pattern, placeholder, redacted)
+        else:
+            redacted = redacted.replace(f["match"], placeholder)
+
+    return redacted
+
+
+def check_input(text: str, policy: dict) -> dict:
+    """Run all input guards.
+
+    Returns {safe, violations, notes, redacted_text}.
+    `redacted_text` is set when policy says pii_action: redact — in that case
+    the PII becomes a non-blocking NOTE instead of a blocking VIOLATION.
+    """
+    violations, notes = [], []
+    redacted_text = None
+    cfg = policy.get("input_guards", {})
+
+    # ---- PII ----
+    if cfg.get("block_pii"):
+        pii = detect_pii(text)
+        if pii:
+            if cfg.get("pii_action", "block") == "redact":
+                redacted_text = redact_pii(text, pii)
+                notes.append({"guard": "pii", "action": "redacted", "details": pii})
+            else:
+                violations.append({"guard": "pii", "details": pii})
+
+    # ---- Injection ----
+    if cfg.get("block_prompt_injection"):
+        if detect_prompt_injection(text, cfg.get("blocked_phrases", [])):
+            violations.append({"guard": "prompt_injection",
+                               "details": "Prompt injection detected"})
+
+    return {
+        "safe": len(violations) == 0,
+        "violations": violations,
+        "notes": notes,
+        "redacted_text": redacted_text,
+    }
+
+# text = "My card 4532-0151-1283-0366 and 1234567890123456 and my friend card is: 1 2 3 456 789 01 2      5 4 5    6 , blabla321@example.com, okok3212   @ e xample     . c o m "
+# x = detect_pii(text)
+# print(redact_pii(text, x))
