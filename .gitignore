@@ -1,0 +1,6 @@
+__pycache__/
+*.py[oc]
+build/
+.venv
+.env
+test.py
