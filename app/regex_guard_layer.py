@@ -25,6 +25,15 @@ INJECTION_PATTERNS = [
     r"(copy|paste|reproduce)\s+.{0,20}(prompt|instructions|rules)",
 ]
 
+PII_PATTERNS = {
+    "credit_card": r"\b(?:\d{4}[-\s]?){3}\d{4}\b",
+    "ssn":         r"\b\d{3}-\d{2}-\d{4}\b",
+    "email":       r"\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}\b",
+    # Require a separator so we don't flag every 10-digit number.
+    "phone":       r"\b(?:\+?1[-.\s]?)?\(?\d{3}\)?[-.\s]\d{3}[-.\s]\d{4}\b",
+    "ip_address":  r"\b(?:(?:25[0-5]|2[0-4]\d|1?\d?\d)\.){3}(?:25[0-5]|2[0-4]\d|1?\d?\d)\b",
+}
+
 
 def detect_prompt_injection(text: str, blocked_phrases: list = None) -> bool:
     """True if the text matches any known injection pattern."""
@@ -39,3 +48,64 @@ def detect_prompt_injection(text: str, blocked_phrases: list = None) -> bool:
             return True
 
     return False
+
+def _luhn_valid(digits: str) -> bool:
+    """Luhn checksum — filters random digit runs out of card detection."""
+    if not digits.isdigit() or not 13 <= len(digits) <= 19:
+        return False
+    total = 0
+    for i, d in enumerate(reversed(digits)):
+        n = int(d)
+        if i % 2 == 1:          # double every second digit from the right
+            n *= 2
+            if n > 9:
+                n -= 9
+        total += n
+    return total % 10 == 0
+
+
+def detect_pii(text: str) -> list[dict]:
+    """Detect PII. Returns [{type, match, evasion?}, ...]."""
+    findings = []
+    seen = set()
+
+    def add(pii_type, match, evasion=None):
+        if (pii_type, match) in seen:
+            return
+        seen.add((pii_type, match))
+        f = {"type": pii_type, "match": match}
+        if evasion:
+            f["evasion"] = evasion
+        findings.append(f)
+
+    # ---- Pass 1: normal text ----
+    for pii_type, pattern in PII_PATTERNS.items():
+        for match in re.findall(pattern, text, re.IGNORECASE):
+            add(pii_type, match)
+
+    # ---- Pass 2: spacing-evasion (collapse whitespace, relax boundaries) ----
+    collapsed = re.sub(r"\s+", "", text)
+    collapsed_patterns = {
+        "credit_card": r"(?:\d[-]?){13,16}",
+        "ssn":         r"\d{3}-\d{2}-\d{4}",
+        "email":       r"[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}",
+        "ip_address":  r"(?:\d{1,3}\.){3}\d{1,3}",
+    }
+    card_runs = set()
+    for pii_type, pattern in collapsed_patterns.items():
+        for match in re.findall(pattern, collapsed, re.IGNORECASE):
+            digits = re.sub(r"\D", "", match)
+            if pii_type == "credit_card":
+                # Luhn gate: kills ~90% of random-number false positives
+                if not (13 <= len(digits) <= 16) or not _luhn_valid(digits):
+                    continue
+                card_runs.add(digits)
+            # Don't double-report a card's digits as an SSN
+            if pii_type == "ssn" and any(digits in run for run in card_runs):
+                continue
+            add(pii_type, match, evasion="spacing")
+
+    return findings
+
+
+# print(detect_pii("My card 4532-0151-1283-0366 and 1234567890123456 and my friend card is: 1 2 3 456 789 01 2      5 4 5    6 , blabla321@example.com, okok3212   @ e xample     . c o m "))
