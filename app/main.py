@@ -2,7 +2,7 @@ import os
 from dotenv import load_dotenv
 load_dotenv()
 
-from langchain_openai import ChatOpenAI
+
 from langgraph.graph import START, END, StateGraph
 from langgraph.graph.message import add_messages
 from typing import TypedDict, Annotated

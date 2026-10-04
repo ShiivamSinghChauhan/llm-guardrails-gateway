@@ -1,6 +1,7 @@
 """Input guardrails - layer 1: fast deterministic regex."""
 
 import re
+from llm import classify_score
 
 INJECTION_PATTERNS = [
     r"ignore\s+(all\s+)?(previous|prior|above|the|your)\s+(instructions|prompts|rules|system\s*prompt|guidelines)",
@@ -138,16 +139,28 @@ def redact_pii(text: str, findings: list[dict]) -> str:
     return redacted
 
 
-def check_input(text: str, policy: dict) -> dict:
-    """Run all input guards.
+CLASSIFIER_THRESHOLD = 0.8
 
-    Returns {safe, violations, notes, redacted_text}.
-    `redacted_text` is set when policy says pii_action: redact — in that case
-    the PII becomes a non-blocking NOTE instead of a blocking VIOLATION.
-    """
+
+def check_input(text: str, policy: dict) -> dict:
     violations, notes = [], []
     redacted_text = None
     cfg = policy.get("input_guards", {})
+    use_classifier = cfg.get("use_classifier", False)
+    threshold = cfg.get("classifier_threshold", CLASSIFIER_THRESHOLD)
+    cascade = cfg.get("classifier_mode", "always") == "cascade"
+
+    # ---- Layer 1: regex (always on) ----
+    regex_injection = cfg.get("block_prompt_injection") and detect_prompt_injection(
+        text, cfg.get("blocked_phrases", []))
+    regex_jailbreak = cfg.get("block_jailbreak") and detect_jailbreak(text)
+
+    # ---- Layer 2: classifier (skipped in cascade mode if regex already fired) ----
+    attack_score = None
+    wants_classifier = use_classifier and (
+        cfg.get("block_prompt_injection") or cfg.get("block_jailbreak"))
+    if wants_classifier and not (cascade and (regex_injection or regex_jailbreak)):
+        attack_score = classify_score(text)
 
     # ---- PII ----
     if cfg.get("block_pii"):
@@ -159,25 +172,27 @@ def check_input(text: str, policy: dict) -> dict:
             else:
                 violations.append({"guard": "pii", "details": pii})
 
-    # ---- Injection ----
+    # ---- Injection: regex OR classifier ----
     if cfg.get("block_prompt_injection"):
-        if detect_prompt_injection(text, cfg.get("blocked_phrases", [])):
+        flagged = bool(regex_injection)
+        if attack_score is not None and attack_score >= threshold:
+            flagged = True
+        if flagged:
             violations.append({"guard": "prompt_injection",
-                               "details": "Prompt injection detected"})
+                               "details": "Prompt injection detected",
+                               "score": attack_score})
 
     # ---- Jailbreak ----
     if cfg.get("block_jailbreak"):
-        if detect_jailbreak(text):
+        flagged = bool(regex_jailbreak)
+        if (attack_score is not None and attack_score >= threshold
+                and not any(v["guard"] == "prompt_injection" for v in violations)):
+            flagged = True
+        if flagged:
             violations.append({"guard": "jailbreak",
-                               "details": "Jailbreak attempt detected"})
-            
-    return {
-        "safe": len(violations) == 0,
-        "violations": violations,
-        "notes": notes,
-        "redacted_text": redacted_text,
-    }
+                               "details": "Jailbreak attempt detected",
+                               "score": attack_score})
 
-# text = "My card 4532-0151-1283-0366 and 1234567890123456 and my friend card is: 1 2 3 456 789 01 2      5 4 5    6 , blabla321@example.com, okok3212   @ e xample     . c o m "
-# x = detect_pii(text)
-# print(redact_pii(text, x))
+    return {"safe": len(violations) == 0, "violations": violations,
+            "notes": notes, "redacted_text": redacted_text}
+

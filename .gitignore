@@ -6,3 +6,4 @@ build/
 .env
 test.py
 uv.lock
+test.ipynb
