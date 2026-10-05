@@ -7,18 +7,13 @@ from langgraph.graph import START, END, StateGraph
 from langgraph.graph.message import add_messages
 from typing import TypedDict, Annotated
 from langgraph.checkpoint.memory import InMemorySaver
-from langchain_core.messages import AnyMessage, HumanMessage
-from regex_guard_layer import detect_prompt_injection
+from langchain_core.messages import AnyMessage, HumanMessage, SystemMessage
+from input_guards import check_input
+from llm import _get_llm
 
 FALLBACK = "I'm sorry, I cannot process this request as it violates our safety policies."
 
-
-llm = ChatOpenAI(
-    model='openai/gpt-oss-20b',
-    api_key=os.getenv("GROQ_API_KEY"),
-    base_url="https://api.groq.com/openai/v1",
-    temperature=0,
-)
+llm = _get_llm()
 
 SYSTEM_PROMPT = """You are a helpful assistant for AcmeCorp.
 Internal rules:
@@ -31,7 +26,12 @@ class ChatState(TypedDict):
 
 def chat_node(state: ChatState):
     messages = state['messages']
-    response = llm.invoke(messages)
+
+    response = llm.invoke([
+        SystemMessage(content=SYSTEM_PROMPT),
+        messages
+    ])
+    
     return {'messages': [response]}
 
 checkpointer = InMemorySaver()
@@ -43,21 +43,3 @@ graph.add_edge('chat_node', END)
 
 chatbot = graph.compile(checkpointer=checkpointer)
 
-
-thread_id = '1'
-while True:
-    user_message = input('You: ')
-    if user_message.strip().lower() in ['break', 'end', 'bye', 'quit']:
-        break
-
-    # GUARD: check before we spend a single token
-    if detect_prompt_injection(user_message):
-        print("  [BLOCKED: prompt_injection]")
-
-        print(FALLBACK)
-        break
-
-    config = {'configurable': {'thread_id': thread_id}}
-    result = chatbot.invoke({'messages': [HumanMessage(content=user_message)]}, config=config)
-
-    print('AI: ', result['messages'][-1].content)
